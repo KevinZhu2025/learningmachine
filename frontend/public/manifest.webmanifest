@@ -1,0 +1,10 @@
+{
+  "name": "LearningMachine 好玩儿科技",
+  "short_name": "好玩儿科技",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fffaf1",
+  "theme_color": "#fff8e9",
+  "lang": "zh-CN",
+  "description": "导入、整理和追踪学习知识"
+}
