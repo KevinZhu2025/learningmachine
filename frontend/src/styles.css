@@ -50,6 +50,12 @@ button, input, textarea { font: inherit; }
 .composer-text textarea { min-height:100px; }
 .composer-toolbar { display:flex; align-items:center; gap:10px; padding-top:10px; border-top:1px solid #f0f1f3; }
 .composer-toolbar .format-hint { flex:1; color:#9aa1ab; font-size:11px; }
+.web-url-field { margin:12px 0; }
+.web-url-field textarea { min-height:64px; }
+.source-list { display:grid; gap:8px; margin:18px 0; }
+.source-list h3 { margin:0; font-size:14px; }
+.source-list-item { display:flex; align-items:center; gap:8px; min-width:0; color:#5f6875; font-size:12px; }
+.source-list-item small { overflow:hidden; color:#8993a2; text-overflow:ellipsis; white-space:nowrap; }
 .plus-icon { width:22px; height:22px; display:grid; place-items:center; color:#687492; border:1px solid #d9deea; border-radius:50%; font-size:20px; line-height:18px; }
 .attachment-list { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 10px; }
 .attachment-chip { display:flex; gap:5px; align-items:center; padding:6px 9px; border-radius:9px; background:#f0f4fb; color:#57677d; font-size:12px; }
@@ -82,7 +88,13 @@ button, input, textarea { font: inherit; }
 .candidate-card { padding:17px 19px; border:1px solid #ece9e3; border-radius:16px; background:#fff; }
 .candidate-card h3 { margin:0; color:#38445a; font-size:16px; }
 .candidate-card [data-slot="description"] { color:#9098a5; font-size:12px; }
+.candidate-knowledge-id { margin:12px 0 0; color:#748096; font-size:12px; }
 .candidate-content { margin:14px 0; color:#4c5667; font-size:14px; line-height:1.8; white-space:pre-wrap; }
+.candidate-edit-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:14px 0; }
+.candidate-edit-grid label { display:grid; gap:6px; color:#566176; font-size:12px; font-weight:600; }
+.candidate-edit-grid .candidate-content-field { grid-column:1 / -1; }
+.candidate-edit-grid select { min-height:36px; padding:6px 9px; border:1px solid #d5d9e2; border-radius:6px; background:#fff; color:#364152; font:inherit; }
+.candidate-edit-actions { display:flex; align-items:end; gap:8px; }
 .source-quote { padding:11px 13px; border-left:3px solid #9aabe8; border-radius:0 8px 8px 0; background:#f6f7fc; color:#68738a; font-size:12px; }
 .source-quote p { margin:6px 0 0; line-height:1.65; }
 .candidate-actions { display:flex; gap:8px; margin-top:13px; }
@@ -106,6 +118,17 @@ button, input, textarea { font: inherit; }
 .config-table textarea { resize:none; }
 .config-empty, .config-message { padding:8px 12px; color:#687492; font-size:13px; }
 .config-actions { display:flex; gap:10px; margin-top:14px; }
+.auth-shell,.auth-loading { min-height:100vh; display:grid; place-items:center; padding:24px; }
+.auth-card { width:min(440px,100%); padding:32px; border:1px solid #eeece7; border-radius:22px; background:#fff; box-shadow:0 16px 48px #30436912; }
+.auth-brand-mark { display:grid; place-items:center; margin-bottom:18px; }
+.auth-card h1 { margin:6px 0; color:#293750; font-size:25px; }
+.auth-card > p { margin:0 0 22px; color:#808a99; font-size:14px; }
+.auth-form { display:grid; gap:16px; }
+.auth-form small { color:#8993a2; font-weight:400; }
+.auth-form > button { margin-top:4px; }
+.auth-switch { display:block; margin:18px auto 0; border:0; color:#4968c8; background:none; cursor:pointer; font-size:13px; }
+.auth-message { padding:9px 12px; border-radius:9px; color:#346448!important; background:#edf8f0; font-size:13px!important; }
+.signed-in-user { color:#59667b; font-size:13px; }
 .visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; clip-path:inset(50%); }
 @media (max-width:760px) {
   .app-shell { width:calc(100% - 28px); }
@@ -125,6 +148,8 @@ button, input, textarea { font: inherit; }
   .detail-footer { align-items:stretch; flex-direction:column; }
 }
 @media (max-width:430px) {
+  .candidate-edit-grid { grid-template-columns:1fr; }
+  .candidate-edit-grid .candidate-content-field { grid-column:auto; }
   .welcome-illustration { display:none; }
   .welcome-copy h1 { font-size:21px; }
   .tab { flex:1; justify-content:center; padding-left:7px; padding-right:7px; font-size:13px; }

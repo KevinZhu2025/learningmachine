@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@fluentui/react-components";
+import { apiFetch } from "./api";
 
 type Values = {
   subjectId: string;
@@ -7,9 +8,9 @@ type Values = {
   userId: string | null;
   creationTime: string | null;
 };
-type Prompt = Values & { promptLeadingId: number };
-type Row = { key: string; id: number | null; original: Values | null; values: Values };
-type Options = { subjects: string[]; users: string[] };
+type Prompt = Values & { promptLeadingId: string };
+type Row = { key: string; id: string | null; original: Values | null; values: Values };
+type Options = { subjects: string[]; users: string[]; userId: string; isAdmin: boolean };
 
 function rowFromPrompt(prompt: Prompt): Row {
   const { promptLeadingId, ...values } = prompt;
@@ -28,11 +29,24 @@ async function responseJson(response: Response) {
   return body;
 }
 
-export default function PromptConfig({ active }: { active: boolean }) {
+export default function PromptConfig({
+  active,
+  isAdmin,
+  userId,
+}: {
+  active: boolean;
+  isAdmin: boolean;
+  userId: string;
+}) {
   const [subject, setSubject] = useState("");
   const [user, setUser] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
-  const [options, setOptions] = useState<Options>({ subjects: [], users: [] });
+  const [options, setOptions] = useState<Options>({
+    subjects: [],
+    users: [],
+    userId,
+    isAdmin,
+  });
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -43,8 +57,8 @@ export default function PromptConfig({ active }: { active: boolean }) {
   async function load(subjectFilter: string, userFilter: string) {
     const query = new URLSearchParams({ subjectId: subjectFilter.trim(), userId: userFilter.trim() });
     const [listResponse, optionsResponse] = await Promise.all([
-      fetch(`/api/prompt-config?${query}`),
-      fetch("/api/prompt-config/options"),
+      apiFetch(`/api/prompt-config?${query}`),
+      apiFetch("/api/prompt-config/options"),
     ]);
     const [list, choices]: [Prompt[], Options] = await Promise.all([
       responseJson(listResponse),
@@ -92,7 +106,12 @@ export default function PromptConfig({ active }: { active: boolean }) {
       key: crypto.randomUUID(),
       id: null,
       original: null,
-      values: { subjectId: subject.trim(), prompts: "", userId: user.trim() || null, creationTime: null },
+      values: {
+        subjectId: subject.trim(),
+        prompts: "",
+        userId: isAdmin ? user.trim() || null : userId,
+        creationTime: null,
+      },
     }]);
     setError("");
     setMessage("");
@@ -114,7 +133,7 @@ export default function PromptConfig({ active }: { active: boolean }) {
     setError("");
     setMessage("");
     try {
-      const response = await fetch("/api/prompt-config", {
+      const response = await apiFetch("/api/prompt-config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rows: changed.map((row) => ({
@@ -140,16 +159,22 @@ export default function PromptConfig({ active }: { active: boolean }) {
   return (
     <section className="config-panel" hidden={!active} aria-label="配置管理">
       <div className="history-heading"><div><span className="section-kicker">提示词配置</span><h2>配置管理</h2></div></div>
-      <p className="config-note">本地预览数据库；用户留空表示共享。创建时间按 UTC 输入（例如 2026-10-30T12:00:00），新增时留空自动生成。</p>
+      <p className="config-note">
+        {isAdmin
+          ? "管理员可管理个人及共享提示词；共享记录的用户留空。新建记录时间由服务端生成。"
+          : "仅可管理自己的提示词；共享提示词只读。新建提示词将归属当前账户。"}
+      </p>
       <div className="config-filters">
         <label className="field"><span>课程</span>
           <Input list="config-subjects" value={subject} onChange={(_, data) => setSubject(data.value)} placeholder="全部课程" disabled={busy} />
         </label>
         <datalist id="config-subjects">{options.subjects.map((value) => <option key={value} value={value} />)}</datalist>
-        <label className="field"><span>用户</span>
-          <Input list="config-users" value={user} onChange={(_, data) => setUser(data.value)} placeholder="全部用户" disabled={busy} />
-        </label>
-        <datalist id="config-users">{options.users.map((value) => <option key={value} value={value} />)}</datalist>
+        {isAdmin ? (
+          <label className="field"><span>用户</span>
+            <Input list="config-users" value={user} onChange={(_, data) => setUser(data.value)} placeholder="全部用户" disabled={busy} />
+            <datalist id="config-users">{options.users.map((value) => <option key={value} value={value} />)}</datalist>
+          </label>
+        ) : <div className="field"><span>用户</span><Input value={userId} readOnly /></div>}
         <Button appearance="primary" onClick={() => void search()} disabled={busy}>搜索</Button>
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
@@ -159,10 +184,10 @@ export default function PromptConfig({ active }: { active: boolean }) {
           <thead><tr><th>课程</th><th>提示词</th><th>用户</th><th>创建时间（UTC）</th></tr></thead>
           <tbody>{rows.map((row, index) => (
             <tr key={row.key}>
-              <td><input aria-label={`第${index + 1}行课程`} value={row.values.subjectId} maxLength={100} disabled={busy} onChange={(event) => change(row.key, "subjectId", event.target.value)} /></td>
-              <td><textarea aria-label={`第${index + 1}行提示词`} value={row.values.prompts} disabled={busy} onChange={(event) => change(row.key, "prompts", event.target.value)} /></td>
-              <td><input aria-label={`第${index + 1}行用户`} value={row.values.userId ?? ""} maxLength={100} disabled={busy} onChange={(event) => change(row.key, "userId", event.target.value)} /></td>
-              <td><input aria-label={`第${index + 1}行创建时间`} value={row.values.creationTime ?? ""} disabled={busy} placeholder="自动生成 / ISO 时间" onChange={(event) => change(row.key, "creationTime", event.target.value)} /></td>
+              <td><input aria-label={`第${index + 1}行课程`} value={row.values.subjectId} maxLength={100} disabled={busy || (!isAdmin && row.values.userId === null)} onChange={(event) => change(row.key, "subjectId", event.target.value)} /></td>
+              <td><textarea aria-label={`第${index + 1}行提示词`} value={row.values.prompts} disabled={busy || (!isAdmin && row.values.userId === null)} onChange={(event) => change(row.key, "prompts", event.target.value)} /></td>
+              <td><input aria-label={`第${index + 1}行用户`} value={row.values.userId ?? ""} maxLength={100} disabled={busy || !isAdmin} onChange={(event) => change(row.key, "userId", event.target.value)} /></td>
+              <td><input aria-label={`第${index + 1}行创建时间`} value={row.values.creationTime ?? ""} disabled placeholder="服务端生成" /></td>
             </tr>
           ))}</tbody>
         </table>

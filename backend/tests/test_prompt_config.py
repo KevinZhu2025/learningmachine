@@ -9,6 +9,7 @@ from app.db import Base, get_session
 from app.main import app
 from app.models import ImportBatch, PromptLeading
 from app.processor import select_prompt_history
+from conftest import authenticate
 
 
 @pytest.fixture
@@ -23,6 +24,7 @@ def prompt_client(tmp_path):
 
     app.dependency_overrides[get_session] = override_session
     with TestClient(app) as client:
+        authenticate(client, "Admin")
         yield client, factory
     app.dependency_overrides.clear()
     engine.dispose()
@@ -36,11 +38,20 @@ def test_create_filter_edit_and_prompt_selection(prompt_client):
     client, factory = prompt_client
     response = client.post("/api/prompt-config", json={"rows": [
         {"values": values()},
-        {"values": values("数学", "共享提示", None, "2024-01-02T03:04:05Z")},
         {"values": values("General", "通用提示", "Admin")},
     ]})
     assert response.status_code == 200
-    assert response.json() == {"saved": 3}
+    assert response.json() == {"saved": 2}
+    with factory() as session:
+        session.add(
+            PromptLeading(
+                subject_id="数学",
+                prompts="共享提示",
+                user_id=None,
+                creation_time=datetime(2024, 1, 2, 3, 4, 5),
+            )
+        )
+        session.commit()
     options = client.get("/api/prompt-config/options").json()
     assert set(options["subjects"]) == {"General", "数学", "历史"}
     assert options["users"] == ["Admin", "demo-user"]
@@ -50,14 +61,23 @@ def test_create_filter_edit_and_prompt_selection(prompt_client):
     assert client.get("/api/prompt-config", params={"subjectId": "历史", "userId": "Admin"}).json() == []
     row = next(item for item in all_rows if item["subjectId"] == "历史")
     original = {key: value for key, value in row.items() if key != "promptLeadingId"}
-    changed = {**original, "prompts": "修改后提示", "creationTime": "2025-03-01T10:00:00+08:00"}
+    changed = {**original, "prompts": "修改后提示"}
     response = client.post("/api/prompt-config", json={"rows": [{
         "promptLeadingId": row["promptLeadingId"], "original": original, "values": changed,
     }]})
     assert response.status_code == 200
     saved = client.get("/api/prompt-config", params={"subjectId": "历史"}).json()[0]
     assert saved["prompts"] == "修改后提示"
-    assert saved["creationTime"] == "2025-03-01T02:00:00"
+    assert saved["creationTime"] == original["creationTime"]
+    changed_time = client.post("/api/prompt-config", json={"rows": [{
+        "promptLeadingId": saved["promptLeadingId"],
+        "original": {key: value for key, value in saved.items() if key != "promptLeadingId"},
+        "values": {
+            **{key: value for key, value in saved.items() if key != "promptLeadingId"},
+            "creationTime": "2025-03-01T10:00:00+08:00",
+        },
+    }]})
+    assert changed_time.status_code == 422
     with factory() as session:
         prompts, source = select_prompt_history(session, "历史", "demo-user")
         assert source == "USER_SUBJECT"
@@ -115,10 +135,9 @@ def test_invalid_values_do_not_save(prompt_client, bad_values):
     assert client.get("/api/prompt-config").json() == []
 
 
-def test_production_configuration_is_unavailable(prompt_client, monkeypatch):
-    from app import main
-
+def test_prompt_config_requires_authentication(prompt_client):
     client, _ = prompt_client
-    monkeypatch.setattr(main, "APP_ENV", "production")
-    assert client.get("/api/prompt-config").status_code == 503
-    assert client.post("/api/prompt-config", json={"rows": [{"values": values()}]}).status_code == 503
+    client.cookies.clear()
+    client.headers.pop("X-CSRF-Token", None)
+    assert client.get("/api/prompt-config").status_code == 401
+    assert client.post("/api/prompt-config", json={"rows": [{"values": values()}]}).status_code == 401
