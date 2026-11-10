@@ -24,6 +24,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
       # 🛠️ Local Build Section (Optional)
       # The following section in your workflow is designed to catch build issues early on the client side, before deployment. This can be helpful for debugging and validation. However, if this step significantly increases deployment time and early detection is not critical for your workflow, you may remove this section to streamline the deployment process.
       - name: Create and Start virtual environment and Install dependencies
@@ -59,13 +72,20 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
-      
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_9AD4A0F47E4742349C018ED9A59FA24A }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_B36271836DD442F29ADFF4D379670DD3 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_78FEA548C6E54DE982C7AEFFEA90E25B }}
+
+      - name: Configure App Service startup
+        run: |
+          az webapp config set \
+            --resource-group learningmachine-dev \
+            --name learningmachine \
+            --startup-file "python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000"
 
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
