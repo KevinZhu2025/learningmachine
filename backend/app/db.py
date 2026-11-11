@@ -1,5 +1,8 @@
 import os
 import struct
+import base64
+import json
+import logging
 from pathlib import Path
 
 from sqlalchemy import MetaData, create_engine, event, inspect
@@ -18,6 +21,22 @@ def enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
 
 class Base(DeclarativeBase):
     pass
+
+
+def _log_sql_identity_match(token: str) -> None:
+    expected_principal = os.getenv("AZURE_SQL_EXPECTED_PRINCIPAL_ID")
+    expected_tenant = os.getenv("AZURE_SQL_EXPECTED_TENANT_ID")
+    if not expected_principal or not expected_tenant:
+        return
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        logging.getLogger(__name__).warning(
+            "SQL identity diagnostics: principal_match=%s tenant_match=%s",
+            claims.get("oid") == expected_principal, claims.get("tid") == expected_tenant,
+        )
+    except (ValueError, IndexError, UnicodeDecodeError):
+        logging.getLogger(__name__).warning("SQL identity diagnostics unavailable")
 
 
 def _database_url():
@@ -47,7 +66,9 @@ def make_engine(database_url: str | None = None):
             @event.listens_for(target, "do_connect")
             def sql_access_token(dialect, connection_record, arguments, keyword_arguments):
                 arguments[0] = arguments[0].replace(";Trusted_Connection=Yes", "").replace(";Trusted_Connection=yes", "")
-                token = credential.get_token("https://database.windows.net/.default").token.encode("utf-16-le")
+                raw_token = credential.get_token("https://database.windows.net/.default").token
+                _log_sql_identity_match(raw_token)
+                token = raw_token.encode("utf-16-le")
                 keyword_arguments.setdefault("attrs_before", {})[1256] = struct.pack("<I", len(token)) + token
     return target
 

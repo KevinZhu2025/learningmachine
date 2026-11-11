@@ -13,6 +13,24 @@ from app.models import (
 )
 
 
+def test_sql_identity_diagnostics_never_logs_token_or_claim_values(monkeypatch, caplog):
+    import base64
+    import json
+    from app.db import _log_sql_identity_match
+
+    monkeypatch.setenv("AZURE_SQL_EXPECTED_PRINCIPAL_ID", "expected-principal")
+    monkeypatch.setenv("AZURE_SQL_EXPECTED_TENANT_ID", "expected-tenant")
+    payload = base64.urlsafe_b64encode(json.dumps({"oid": "expected-principal", "tid": "different-tenant"}).encode()).decode().rstrip("=")
+    token = "header." + payload + ".sensitive-signature"
+    _log_sql_identity_match(token)
+    assert "principal_match=True tenant_match=False" in caplog.text
+    assert token not in caplog.text
+    assert "expected-principal" not in caplog.text
+    assert "different-tenant" not in caplog.text
+    _log_sql_identity_match("invalid")
+    assert "diagnostics unavailable" in caplog.text
+
+
 def test_import_and_user_schema_matches_database_requirements():
     assert ImportBatch.__table__.c.ImportBatchID.primary_key
     assert "SourceObjectKey" not in ImportBatch.__table__.c
