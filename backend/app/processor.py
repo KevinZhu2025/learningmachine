@@ -2,6 +2,9 @@ import io
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 from datetime import timezone
 from uuid import uuid4
 from zipfile import BadZipFile
@@ -20,10 +23,38 @@ from .model_contract import ModelResult, validate_request, validate_result
 
 MAX_FILE_BYTES = 15 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".txt", ".md", ".docx", ".pdf"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+OFFICE_EXTENSIONS = {".doc", ".ppt", ".pptx"}
 
 
 class UnsupportedSourceError(ValueError):
     pass
+
+
+def office_pdf(filename: str, content: bytes) -> bytes:
+    if len(content) > MAX_FILE_BYTES:
+        raise UnsupportedSourceError("单个文件超过 15 MB 限制。")
+    converter = shutil.which(os.getenv("LIBREOFFICE_PATH", "soffice"))
+    if converter is None:
+        raise UnsupportedSourceError("服务器尚未安装 LibreOffice 转换器，无法解析 DOC/PPT/PPTX；请安装后重试，或先导出 PDF。")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / ("source" + Path(filename).suffix.lower())
+        source.write_bytes(content)
+        try:
+            result = subprocess.run(
+                [converter, "-env:UserInstallation=" + (root / "profile").as_uri(),
+                 "--headless", "--convert-to", "pdf", "--outdir", str(root), str(source)],
+                capture_output=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise UnsupportedSourceError("Office 文件转换失败或超时，请检查文件或导出 PDF 后重试。") from exc
+        output = root / "source.pdf"
+        if result.returncode != 0 or not output.is_file():
+            raise UnsupportedSourceError("Office 文件无法转换为 PDF，请检查文件是否损坏或加密。")
+        if output.stat().st_size > MAX_FILE_BYTES:
+            raise UnsupportedSourceError("Office 转换后的 PDF 超过 15 MB 限制，请拆分文件。")
+        return output.read_bytes()
 
 
 def generate_preview_prompt(subject_id: str, user_comments: str) -> str:
@@ -92,8 +123,10 @@ def create_prompt_and_snapshot(
 
 def extract_plain_text(filename: str, content: bytes) -> tuple[str, str]:
     extension = Path(filename).suffix.lower()
+    if extension in OFFICE_EXTENSIONS:
+        return extract_plain_text("converted.pdf", office_pdf(filename, content))
     if extension not in ALLOWED_EXTENSIONS:
-        raise UnsupportedSourceError(f"暂不支持 {extension or '无扩展名'} 文件；当前仅支持 TXT、Markdown、DOCX 和可提取文本的 PDF。")
+        raise UnsupportedSourceError(f"无法按文本解析 {extension or '无扩展名'} 文件；图片和扫描文档须进入识图流程。")
     if len(content) > MAX_FILE_BYTES:
         raise UnsupportedSourceError("单个文件超过 15 MB 限制。")
     if extension in {".txt", ".md"}:
@@ -103,7 +136,9 @@ def extract_plain_text(filename: str, content: bytes) -> tuple[str, str]:
             document = Document(io.BytesIO(content))
         except (BadZipFile, PackageNotFoundError, ValueError) as exc:
             raise UnsupportedSourceError("DOCX 文件损坏或格式无效。") from exc
-        return "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()), "BLOB"
+        parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+        parts.extend("\t".join(cell.text for cell in row.cells) for table in document.tables for row in table.rows)
+        return "\n".join(parts), "BLOB"
     try:
         reader = PdfReader(io.BytesIO(content))
     except (PdfReadError, ValueError) as exc:

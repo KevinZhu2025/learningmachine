@@ -472,7 +472,23 @@ def test_preview_import_stays_staged(tmp_path, monkeypatch):
         )
         assert rejected.status_code == 200
         assert rejected.json()["status"] == "FAILED"
-        assert "暂不支持" in rejected.json()["errorMessage"]
+        assert "无法读取上传图片" in rejected.json()["errorMessage"]
+        import io
+        from PIL import Image
+
+        for extension, image_format in (("JPG", "JPEG"), ("jpeg", "JPEG"), ("png", "PNG"), ("bmp", "BMP"), ("gif", "GIF"), ("tiff", "TIFF"), ("webp", "WEBP")):
+            buffer = io.BytesIO()
+            Image.new("RGB", (40, 40), "white").save(buffer, format=image_format)
+            accepted = client.post(
+                "/api/imports", headers={"Idempotency-Key": "preview-image-" + extension},
+                files={"files": ("lesson." + extension, buffer.getvalue(), "application/octet-stream")},
+            )
+            assert accepted.status_code == 200
+            uploaded = accepted.json()
+            assert uploaded["status"] == "UPLOADED", uploaded
+            assert len(uploaded["sources"]) == 1
+            assert uploaded["items"] == []
+            assert "预览模式" in uploaded["errorMessage"]
         assert rejected.json()["sources"] == []
     finally:
         app.dependency_overrides.clear()
@@ -563,6 +579,69 @@ def test_public_web_source_is_saved_and_linked_to_candidate(tmp_path, monkeypatc
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
+
+
+def test_integrated_health_checks_dependencies_without_model_calls(monkeypatch):
+    from unittest.mock import MagicMock
+    from app import main
+
+    monkeypatch.setenv("IMPORT_MODE", "integrated")
+    database = MagicMock()
+    database.connect.return_value.__enter__.return_value.exec_driver_sql.return_value.scalar_one.return_value = "MEMPALACE"
+    monkeypatch.setattr(main, "engine", database)
+    configured = MagicMock(return_value=object())
+    monkeypatch.setattr(main, "configured_services", configured)
+    client = TestClient(app)
+    assert client.get("/api/health").json() == {"status": "ok", "mode": "integrated"}
+    configured.assert_called_once()
+    database.connect.side_effect = RuntimeError("sensitive connection details")
+    failed = client.get("/api/health")
+    assert failed.status_code == 503
+    assert "sensitive connection details" not in failed.text
+
+
+def test_office_conversion_and_docx_tables(monkeypatch):
+    import io
+    import subprocess
+    from pathlib import Path
+    import pymupdf
+    import pytest
+    from docx import Document
+    from app import processor
+
+    document = Document()
+    document.add_paragraph("Lesson")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "Table knowledge"
+    buffer = io.BytesIO()
+    document.save(buffer)
+    assert "Table knowledge" in processor.extract_plain_text("lesson.docx", buffer.getvalue())[0]
+
+    monkeypatch.setattr(processor.shutil, "which", lambda command: None)
+    with pytest.raises(processor.UnsupportedSourceError, match="LibreOffice"):
+        processor.office_pdf("lesson.ppt", b"slides")
+
+    monkeypatch.setattr(processor.shutil, "which", lambda command: "soffice")
+    def convert(command, **options):
+        assert options["timeout"] == 60
+        assert "--headless" in command
+        output_dir = Path(command[command.index("--outdir") + 1])
+        with pymupdf.open() as pdf:
+            pdf.new_page().insert_text((50, 50), "Slide knowledge")
+            pdf.save(output_dir / "source.pdf")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(processor.subprocess, "run", convert)
+    for extension in ("ppt", "PPTX", "doc"):
+        text, source_type = processor.extract_plain_text("lesson." + extension, b"slides")
+        assert "Slide knowledge" in text
+        assert source_type == "BLOB"
+
+    def timeout(command, **options):
+        raise subprocess.TimeoutExpired(command, options["timeout"])
+
+    monkeypatch.setattr(processor.subprocess, "run", timeout)
+    with pytest.raises(processor.UnsupportedSourceError, match="超时"):
+        processor.office_pdf("lesson.ppt", b"slides")
 
 
 def test_frontend_fallback_serves_assets_and_preserves_api_404(tmp_path):

@@ -79,7 +79,7 @@ type Tab = "new" | "history" | "config";
 
 const API = "/api";
 const statusLabels: Record<string, string> = {
-  UPLOADED: "已上传",
+  UPLOADED: "已接收，待识别",
   PROCESSING: "处理中",
   NEEDS_REVIEW: "待审核",
   COMPLETED: "暂存完成",
@@ -215,8 +215,8 @@ function App() {
   }
 
   async function submitImport() {
-    if (!text.trim() && files.length === 0) {
-      setError("请先输入导入说明，或添加附件。");
+    if (!text.trim() && files.length === 0 && !urls.trim()) {
+      setError("请先输入内容、添加附件或填写网页地址。");
       return;
     }
     setBusy(true);
@@ -550,7 +550,7 @@ function App() {
                     className="visually-hidden"
                     type="file"
                     multiple
-                    accept=".txt,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp"
+                    accept=".txt,.md,.pdf,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff"
                     onChange={(event) => addFiles(event.target.files)}
                   />
                   <Button
@@ -561,7 +561,7 @@ function App() {
                   >
                     添加附件
                   </Button>
-                  <span className="format-hint">TXT、Markdown、PDF、图片 · 图片与扫描 PDF 将进行多模态识别</span>
+                  <span className="format-hint">TXT、Markdown、DOC/DOCX、PPT/PPTX、PDF、JPG/JPEG、PNG、WEBP、BMP、GIF、TIFF</span>
                   <Button appearance="primary" icon={busy ? <Spinner size="tiny" /> : <SendRegular />} disabled={busy} onClick={() => void submitImport()}>
                     {busy ? "正在提交" : "提交导入"}
                   </Button>

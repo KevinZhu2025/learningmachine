@@ -30,8 +30,10 @@ class VisionResult(BaseModel):
 def normalized_image(content: bytes) -> bytes:
     try:
         with Image.open(io.BytesIO(content)) as image:
-            if image.format not in {"PNG", "JPEG", "WEBP"}:
-                raise ImportServiceError("识图仅支持 PNG、JPEG 和 WEBP。")
+            if image.format not in {"PNG", "JPEG", "WEBP", "BMP", "GIF", "TIFF"}:
+                raise ImportServiceError("图片编码不受支持，请提供 JPEG、PNG、WEBP、BMP、GIF 或 TIFF。")
+            if getattr(image, "n_frames", 1) != 1:
+                raise ImportServiceError("多帧图片请拆成单页图片或导出 PDF，避免遗漏后续帧。")
             if image.width * image.height > 20000000:
                 raise ImportServiceError("图片超过 2000 万像素限制。")
             corrected = ImageOps.exif_transpose(image).convert("RGB")

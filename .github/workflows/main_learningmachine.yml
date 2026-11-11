@@ -24,6 +24,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Validate startup script
+        run: bash -n backend/startup.sh
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -44,6 +47,12 @@ jobs:
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
+
+      - name: Test backend
+        run: |
+          source antenv/bin/activate
+          pip install -e "./backend[test]"
+          python -m pytest -q backend/tests
                 
       # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size. 
       - name: Upload artifact for deployment jobs
@@ -85,7 +94,8 @@ jobs:
           az webapp config set \
             --resource-group learningmachine-dev \
             --name learningmachine \
-            --startup-file "python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000"
+            --startup-file "bash backend/startup.sh" \
+            --output none
 
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3

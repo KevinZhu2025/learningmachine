@@ -26,12 +26,15 @@ from .models import ImportBatch, ImportItem, ImportSource
 from .import_services import ImportServiceError, configured_services
 from .vision import normalized_image, scanned_pdf_images, vision_segments
 from .processor import (
+    IMAGE_EXTENSIONS,
+    OFFICE_EXTENSIONS,
     MAX_FILE_BYTES,
     UnsupportedSourceError,
     create_preview_item,
     create_prompt_and_snapshot,
     extract_plain_text,
     extracted_segments,
+    office_pdf,
     run_integrated_import,
 )
 from .schemas import ImportOut, ItemDecisionIn
@@ -84,7 +87,17 @@ def model_out(batch: ImportBatch) -> ImportOut:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "mode": os.getenv("IMPORT_MODE", "preview")}
+    mode = os.getenv("IMPORT_MODE", "preview")
+    if mode == "integrated":
+        try:
+            with engine.connect() as connection:
+                if connection.exec_driver_sql("SELECT DB_NAME()").scalar_one() != "MEMPALACE":
+                    raise RuntimeError("Wrong database")
+            if configured_services() is None:
+                raise RuntimeError("Missing integrated services")
+        except Exception as exc:
+            raise HTTPException(503, "集成服务尚未就绪，请检查数据库、Key Vault 和私有 Blob 访问。") from exc
+    return {"status": "ok", "mode": mode}
 
 
 @app.get("/api/imports", response_model=list[ImportOut])
@@ -214,6 +227,7 @@ async def create_import(
     try:
         source_parts = [normalized_text] if normalized_text else []
         source_name_parts: list[str] = []
+        awaiting_vision = False
         if normalized_text:
             object_name = f"{batch.import_batch_id}-{uuid4().hex}.txt"
             await store_object(object_name, text_bytes, "text/plain; charset=utf-8")
@@ -264,17 +278,29 @@ async def create_import(
                 session.commit()
                 sources_committed = True
             extension = Path(filename).suffix.lower()
-            image_extension = extension in {".png", ".jpg", ".jpeg", ".webp"}
+            image_extension = extension in IMAGE_EXTENSIONS
             images = None
-            if services and image_extension:
-                images = [await asyncio.to_thread(normalized_image, data)]
+            if image_extension:
+                normalized = await asyncio.to_thread(normalized_image, data)
+                if services is None:
+                    awaiting_vision = True
+                    continue
+                images = [normalized]
             else:
+                parse_data = data
+                parse_filename = filename
+                if extension in OFFICE_EXTENSIONS:
+                    parse_data = await asyncio.to_thread(office_pdf, filename, data)
+                    parse_filename = "converted.pdf"
                 try:
-                    parsed, _ = extract_plain_text(filename, data)
+                    parsed, _ = extract_plain_text(parse_filename, parse_data)
                 except UnsupportedSourceError:
-                    if not services or not services.vision or extension != ".pdf":
+                    if Path(parse_filename).suffix.lower() != ".pdf":
                         raise
-                    images = await asyncio.to_thread(scanned_pdf_images, data)
+                    images = await asyncio.to_thread(scanned_pdf_images, parse_data)
+                    if services is None:
+                        awaiting_vision = True
+                        continue
             if images is not None:
                 if not services.vision:
                     raise ImportServiceError("尚未配置支持图像输入的识图模型。")
@@ -347,6 +373,11 @@ async def create_import(
             else "MANUAL"
         )
         combined = "\n\n".join(part for part in source_parts if part).strip()
+        if services is None and awaiting_vision:
+            batch.status = "UPLOADED"
+            batch.error_message = "文件已接收；当前为预览模式，图片或扫描页尚未识别。请启用集成服务后重新导入，不会生成虚构知识点。"
+            session.commit()
+            return model_out(get_batch(session, batch.import_batch_id, user_id))
         if not combined:
             raise UnsupportedSourceError("没有提取到可用于预览的文本。")
         if services is None:

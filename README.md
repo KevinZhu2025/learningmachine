@@ -4,6 +4,17 @@ AI 学习助手：知识导入与整合 MVP。
 
 ## 当前开发范围
 
+### 文件格式与运行模式
+
+- 2026-11-11 发布范围：按用户决定保留 Linux Free F1，不创建镜像仓库；先启用图片、文本、DOCX、PDF 和网页集成导入。DOC/PPT/PPTX 需要 LibreOffice，本轮服务器不安装该转换器，转换上线延后。
+- App Service 通过 `bash backend/startup.sh` 启动。配置 Azure SQL 后先检查 ODBC Driver 18，缺少时从 Microsoft 官方包源安装；只支持 Debian/Ubuntu 且安装阶段需容器 root 身份，不改云端托管计划。首次启动可能较慢。GitHub Actions 会先检查 Bash 语法、构建前端并运行后端测试。
+- 集成 `/api/health` 会验证 MEMPALACE 连接、Key Vault 取密钥和私有 Blob 容器访问；返回 503 表示依赖未就绪。健康检查不请求 Ark 模型，200 不代表所有材料的识别精度或完整导入验收。
+- 图片：JPG/JPEG（含大写扩展名）、PNG、WEBP、BMP、单帧 GIF 和 TIFF；按真实编码解码校验，不仅检查扩展名。多帧图片应拆页或转 PDF，防止静默丢帧。
+- 文档：TXT、Markdown、DOCX（含表格）、PDF；DOC、PPT、PPTX 经 LibreOffice 转成 PDF 后解析，扫描页面在集成模式进入多模态识别。
+- Office 转换服务器须安装 LibreOffice（Linux 通常为 `libreoffice-impress` 和 `libreoffice-writer`），确保 `soffice` 在 PATH 中，或设置 `LIBREOFFICE_PATH` 为可执行文件路径。转换使用独立临时目录、60 秒超时及转换结果 15 MB 上限。仅安装 Python 依赖不会安装 LibreOffice；App Service 需准备包含该系统依赖的运行环境。缺少转换器时明确报配置错误，不声称格式本身不支持。
+- `IMPORT_MODE=preview` 不调用识图或知识抽取模型：有效图片/扫描 PDF 可以接收并保存来源，状态为 `UPLOADED`，提示待识别，不生成图片的虚构知识。要实际提取图片知识，仍需配置数据库、私有 Blob、模型/Key Vault 访问并启用 `integrated`；本次代码改动不自动更改云端模式或授予权限。
+- 网页链接可独立提交，无需同时填写文字或附件；仍保留公网地址校验和 SSRF 防护。
+
 - React + TypeScript + Fluent UI 的前端（包含 PWA manifest）。
 - FastAPI 后端提供导入批次、暂存编辑及来源查询；首期仅暂存，不进行人工审批或写入正式知识库/题库。
 - 集成模式已实现私有 Azure Blob 保存、Ark 请求组装/响应校验、请求与响应审计、知识/题目暂存及失败重试。文本解析支持 TXT、Markdown、DOCX 和文本 PDF；PNG/JPEG/WEBP 及扫描或混合 PDF 使用通用多模态模型加转写提示词，后端整理识别片段。
