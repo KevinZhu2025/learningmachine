@@ -13,22 +13,35 @@ from app.models import (
 )
 
 
-def test_sql_identity_diagnostics_never_logs_token_or_claim_values(monkeypatch, caplog):
-    import base64
-    import json
-    from app.db import _log_sql_identity_match
+def test_database_url_prefers_explicit_connection_string(monkeypatch):
+    from sqlalchemy.engine import make_url
+    from app.db import _database_url
 
-    monkeypatch.setenv("AZURE_SQL_EXPECTED_PRINCIPAL_ID", "expected-principal")
-    monkeypatch.setenv("AZURE_SQL_EXPECTED_TENANT_ID", "expected-tenant")
-    payload = base64.urlsafe_b64encode(json.dumps({"oid": "expected-principal", "tid": "different-tenant"}).encode()).decode().rstrip("=")
-    token = "header." + payload + ".sensitive-signature"
-    _log_sql_identity_match(token)
-    assert "principal_match=True tenant_match=False" in caplog.text
-    assert token not in caplog.text
-    assert "expected-principal" not in caplog.text
-    assert "different-tenant" not in caplog.text
-    _log_sql_identity_match("invalid")
-    assert "diagnostics unavailable" in caplog.text
+    explicit = "mssql+pyodbc://app:secret@rm-example.sqlserver.rds.aliyuncs.com:3433/LearningMachineDB?driver=ODBC+Driver+18"
+    monkeypatch.setenv("DATABASE_URL", explicit)
+    monkeypatch.delenv("SQL_SERVER", raising=False)
+    url = make_url(_database_url())
+    assert url.host == "rm-example.sqlserver.rds.aliyuncs.com"
+    assert url.port == 3433
+    assert url.database == "LearningMachineDB"
+
+
+def test_database_url_builds_from_sql_server_parts(monkeypatch):
+    from sqlalchemy.engine import make_url
+    from app.db import _database_url
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SQL_SERVER", "rm-example.sqlserver.rds.aliyuncs.com")
+    monkeypatch.setenv("SQL_SERVER_PORT", "3433")
+    monkeypatch.setenv("SQL_SERVER_USER", "app")
+    monkeypatch.setenv("SQL_SERVER_PASSWORD", "secret")
+    monkeypatch.setenv("DATABASE_NAME", "LearningMachineDB")
+    url = make_url(_database_url())
+    assert url.drivername == "mssql+pyodbc"
+    assert url.host == "rm-example.sqlserver.rds.aliyuncs.com"
+    assert url.port == 3433
+    assert url.database == "LearningMachineDB"
+    assert url.query["TrustServerCertificate"] == "yes"
 
 
 def test_import_and_user_schema_matches_database_requirements():

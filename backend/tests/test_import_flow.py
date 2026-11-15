@@ -7,14 +7,13 @@ from app.web_source import WebPage
 from conftest import authenticate
 
 
-def test_key_vault_configuration_does_not_expose_secrets(monkeypatch):
+def test_ark_key_configuration_requires_secret(monkeypatch):
     import pytest
     from app.import_services import ImportServiceError, load_ark_api_key
 
     monkeypatch.delenv("ARK_API_KEY", raising=False)
-    monkeypatch.setenv("AZURE_KEY_VAULT_URL", "http://unsafe.vault.azure.net")
-    monkeypatch.setenv("ARK_KEY_VAULT_SECRET", "ark-api-key")
-    with pytest.raises(ImportServiceError, match="HTTPS"):
+    monkeypatch.delenv("ALICLOUD_KMS_SECRET_NAME", raising=False)
+    with pytest.raises(ImportServiceError, match="ARK_API_KEY"):
         load_ark_api_key()
     monkeypatch.setenv("ARK_API_KEY", "test-not-a-secret")
     assert load_ark_api_key() == "test-not-a-secret"
@@ -200,13 +199,13 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
         engine.dispose()
 
 
-def test_official_ark_and_blob_adapters_use_safe_contract(monkeypatch):
+def test_official_ark_and_oss_adapters_use_safe_contract(monkeypatch):
     import json
     import httpx
     import openai
     import pytest
-    from azure.storage import blob
-    from app.import_services import ArkModelProvider, AzureBlobStorage, ImportServiceError
+    import oss2
+    from app.import_services import ArkModelProvider, OssStorage, ImportServiceError
 
     captured = {}
 
@@ -222,40 +221,55 @@ def test_official_ark_and_blob_adapters_use_safe_contract(monkeypatch):
     assert captured["request"]["messages"][0]["role"] == "system"
     assert captured["request"]["response_format"] == {"type": "json_object"}
 
-    class Container:
-        public = None
+    class FakeBucket:
+        acl = oss2.BUCKET_ACL_PRIVATE
         upload_error = None
 
-        def get_container_properties(self, **kwargs):
-            return {"public_access": self.public}
+        def get_bucket_info(self):
+            return object()
 
-        def upload_blob(self, key, content, **kwargs):
+        def get_bucket_acl(self):
+            result = type("AclResult", (), {"acl": self.acl})()
+            return result
+
+        def put_object(self, key, content, headers=None):
             if self.upload_error is not None:
                 raise self.upload_error
-            captured["upload"] = (key, content, kwargs)
+            captured["upload"] = (key, content, headers)
 
-    container = Container()
+        def delete_object(self, key):
+            captured["deleted"] = key
 
-    class Service:
-        def get_container_client(self, name):
-            assert name == "math"
-            return container
+    fake_bucket = FakeBucket()
 
-    monkeypatch.setattr(blob, "BlobServiceClient", lambda *args, **kwargs: Service())
-    storage = AzureBlobStorage("https://mempalacewh.blob.core.windows.net", "math")
+    class FakeAuth:
+        pass
+
+    monkeypatch.setenv("ALICLOUD_RAM_ROLE_NAME", "LearningMachineRAM")
+    monkeypatch.setattr(oss2, "ProviderAuth", lambda provider: FakeAuth())
+    monkeypatch.setattr(oss2, "EcsRamRoleCredentialsProvider", lambda auth_host: object())
+    monkeypatch.setattr(oss2, "Bucket", lambda auth, endpoint, bucket, **kwargs: fake_bucket)
+
+    storage = OssStorage("https://oss-cn-hangzhou-internal.aliyuncs.com", "learningmachineoss")
     storage.put("object", b"source", "text/plain")
-    assert captured["upload"][2]["overwrite"] is False
-    assert captured["upload"][2]["content_settings"].content_type == "text/plain"
-    class ForbiddenError(Exception):
-        status_code = 403
+    assert captured["upload"][0] == "object"
+    assert captured["upload"][2]["Content-Type"] == "text/plain"
+    assert captured["upload"][2]["x-oss-forbid-overwrite"] == "true"
 
-    container.upload_error = ForbiddenError("sensitive response details")
+    class ForbiddenError(oss2.exceptions.OssError):
+        status = 403
+
+        def __init__(self):
+            super().__init__(403, {}, b"", {"Code": "AccessDenied", "Message": "sensitive response details"})
+
+    fake_bucket.upload_error = ForbiddenError()
     with pytest.raises(ImportServiceError, match="HTTP 403") as error:
         storage.put("forbidden", b"source", "text/plain")
     assert "sensitive response details" not in str(error.value)
-    container.public = "blob"
+
+    fake_bucket.acl = "public-read"
     with pytest.raises(ImportServiceError, match="私有"):
-        AzureBlobStorage("https://mempalacewh.blob.core.windows.net", "math")
+        OssStorage("https://oss-cn-hangzhou-internal.aliyuncs.com", "learningmachineoss")
 
 
 def test_vision_rejects_unreliable_text_and_wrong_pages():
@@ -531,7 +545,10 @@ def test_public_web_source_is_saved_and_linked_to_candidate(tmp_path, monkeypatc
     try:
         authenticate(client, "web-user")
         monkeypatch.setenv("IMPORT_MODE", "integrated")
-        monkeypatch.delenv("AZURE_STORAGE_ACCOUNT_URL", raising=False)
+        monkeypatch.delenv("OSS_ENDPOINT", raising=False)
+        monkeypatch.delenv("OSS_BUCKET", raising=False)
+        monkeypatch.delenv("ARK_API_KEY", raising=False)
+        monkeypatch.delenv("ALICLOUD_KMS_SECRET_NAME", raising=False)
         unavailable = client.post(
             "/api/imports",
             headers={"Idempotency-Key": "unconfigured-integrated-import"},
@@ -586,8 +603,9 @@ def test_integrated_health_checks_dependencies_without_model_calls(monkeypatch):
     from app import main
 
     monkeypatch.setenv("IMPORT_MODE", "integrated")
+    monkeypatch.setenv("DATABASE_NAME", "LearningMachineDB")
     database = MagicMock()
-    database.connect.return_value.__enter__.return_value.exec_driver_sql.return_value.scalar_one.return_value = "MEMPALACE"
+    database.connect.return_value.__enter__.return_value.exec_driver_sql.return_value.scalar_one.return_value = "LearningMachineDB"
     monkeypatch.setattr(main, "engine", database)
     configured = MagicMock(return_value=object())
     monkeypatch.setattr(main, "configured_services", configured)

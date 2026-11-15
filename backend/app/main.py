@@ -91,7 +91,8 @@ def health():
     if mode == "integrated":
         try:
             with engine.connect() as connection:
-                if connection.exec_driver_sql("SELECT DB_NAME()").scalar_one() != "MEMPALACE":
+                expected_database = os.getenv("DATABASE_NAME", "LearningMachineDB")
+                if connection.exec_driver_sql("SELECT DB_NAME()").scalar_one() != expected_database:
                     raise RuntimeError("Wrong database")
             if configured_services() is None:
                 raise RuntimeError("Missing integrated services")

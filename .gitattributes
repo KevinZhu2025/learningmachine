@@ -1,1 +1,10 @@
+*.sh text eol=lf
 backend/startup.sh text eol=lf
+deploy/deploy.sh text eol=lf
+deploy/*.service text eol=lf
+deploy/*.conf text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sql text eol=lf
+*.env.example text eol=lf

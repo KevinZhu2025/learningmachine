@@ -12,3 +12,11 @@ frontend/*.tsbuildinfo
 .env
 .env.*
 !.env.example
+deploy/learningmachine.env
+dist/
+*.tar.gz
+antenv/
+*.pem
+*.key
+**/*.pem
+

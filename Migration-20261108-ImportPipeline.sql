@@ -1,7 +1,7 @@
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 SET LOCK_TIMEOUT 15000;
-IF DB_NAME() <> N'MEMPALACE' THROW 51000, 'Wrong database.', 1;
+IF DB_NAME() <> N'LearningMachineDB' THROW 51000, 'Wrong database.', 1;
 BEGIN TRY
     BEGIN TRANSACTION;
     IF COL_LENGTH(N'dbo.ImportItem', N'VersionNo') IS NULL

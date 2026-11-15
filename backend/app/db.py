@@ -1,8 +1,4 @@
 import os
-import struct
-import base64
-import json
-import logging
 from pathlib import Path
 
 from sqlalchemy import MetaData, create_engine, event, inspect
@@ -23,27 +19,26 @@ class Base(DeclarativeBase):
     pass
 
 
-def _log_sql_identity_match(token: str) -> None:
-    expected_principal = os.getenv("AZURE_SQL_EXPECTED_PRINCIPAL_ID")
-    expected_tenant = os.getenv("AZURE_SQL_EXPECTED_TENANT_ID")
-    if not expected_principal or not expected_tenant:
-        return
-    try:
-        payload = token.split(".")[1]
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        logging.getLogger(__name__).warning(
-            "SQL identity diagnostics: principal_match=%s tenant_match=%s",
-            claims.get("oid") == expected_principal, claims.get("tid") == expected_tenant,
-        )
-    except (ValueError, IndexError, UnicodeDecodeError):
-        logging.getLogger(__name__).warning("SQL identity diagnostics unavailable")
-
-
 def _database_url():
+    # 生产环境通过 DATABASE_URL 直接提供完整连接串（含 RDS 主机、端口、库名、账号密码）。
     if os.getenv("DATABASE_URL"):
         return os.environ["DATABASE_URL"]
-    if os.getenv("AZURE_SQL_SERVER"):
-        return URL.create("mssql+pyodbc", host=os.environ["AZURE_SQL_SERVER"], database=os.getenv("AZURE_SQL_DATABASE", "MEMPALACE"), query={"driver": "ODBC Driver 18 for SQL Server", "Encrypt": "yes", "TrustServerCertificate": "no", "LongAsMax": "yes"})
+    # 兼容仅提供主机/库名的部署形态；不再依赖 Azure AD 令牌，统一使用 SQL 账号密码。
+    if os.getenv("SQL_SERVER"):
+        return URL.create(
+            "mssql+pyodbc",
+            username=os.getenv("SQL_SERVER_USER"),
+            password=os.getenv("SQL_SERVER_PASSWORD"),
+            host=os.environ["SQL_SERVER"],
+            port=int(os.getenv("SQL_SERVER_PORT", "1433")),
+            database=os.getenv("DATABASE_NAME", "LearningMachineDB"),
+            query={
+                "driver": "ODBC Driver 18 for SQL Server",
+                "Encrypt": os.getenv("SQL_ENCRYPT", "yes"),
+                "TrustServerCertificate": os.getenv("SQL_TRUST_SERVER_CERTIFICATE", "yes"),
+                "LongAsMax": "yes",
+            },
+        )
     return "sqlite:///./.data/learningmachine-dev.db"
 
 
@@ -57,19 +52,8 @@ def make_engine(database_url: str | None = None):
     options = {"check_same_thread": False} if parsed.drivername.startswith("sqlite") else {}
     target = create_engine(url, connect_args=options, pool_pre_ping=True)
     if parsed.drivername.startswith("mssql"):
+        # 表统一建立在 dbo schema，RDS SQL Server 同样适用。
         target = target.execution_options(schema_translate_map={None: "dbo"})
-        use_identity = os.getenv("AZURE_SQL_AUTH") == "default" or (not os.getenv("DATABASE_URL") and bool(os.getenv("AZURE_SQL_SERVER")))
-        if use_identity:
-            from azure.identity import DefaultAzureCredential
-            credential = DefaultAzureCredential(exclude_interactive_browser_credential=True, process_timeout=60)
-
-            @event.listens_for(target, "do_connect")
-            def sql_access_token(dialect, connection_record, arguments, keyword_arguments):
-                arguments[0] = arguments[0].replace(";Trusted_Connection=Yes", "").replace(";Trusted_Connection=yes", "")
-                raw_token = credential.get_token("https://database.windows.net/.default").token
-                _log_sql_identity_match(raw_token)
-                token = raw_token.encode("utf-16-le")
-                keyword_arguments.setdefault("attrs_before", {})[1256] = struct.pack("<I", len(token)) + token
     return target
 
 
@@ -288,12 +272,13 @@ def initialize_database(target_engine=engine) -> None:
         Base.metadata.create_all(target_engine)
         return
     if target_engine.dialect.name != "mssql":
-        raise RuntimeError("仅支持 SQLite 或 Azure SQL/SQL Server。")
+        raise RuntimeError("仅支持 SQLite 或 SQL Server（含阿里云 RDS）。")
     from .models import AuthSession, AuthThrottle, ImportBatch, ImportItem, ImportSource, PromptLeading, UserProfile
+    expected_database = os.getenv("DATABASE_NAME", "LearningMachineDB")
     try:
         with target_engine.connect() as connection:
-            if connection.exec_driver_sql("SELECT DB_NAME()").scalar_one() != "MEMPALACE":
-                raise RuntimeError("Azure SQL 连接目标必须是 MEMPALACE。")
+            if connection.exec_driver_sql("SELECT DB_NAME()").scalar_one() != expected_database:
+                raise RuntimeError(f"SQL Server 连接目标必须是 {expected_database}。")
             inspector = inspect(connection)
             for model in (UserProfile, AuthSession, AuthThrottle, ImportBatch, ImportSource, ImportItem, PromptLeading):
                 table = model.__table__
@@ -308,4 +293,4 @@ def initialize_database(target_engine=engine) -> None:
     except RuntimeError:
         raise
     except Exception as exc:
-        raise RuntimeError("Azure SQL 连接或身份验证失败，请检查本机配置与数据库权限。") from exc
+        raise RuntimeError("SQL Server 连接或身份验证失败，请检查 RDS 白名单、账号密码与数据库权限。") from exc

@@ -392,7 +392,7 @@ function App() {
       {health?.mode === "preview" && (
         <div className="preview-notice">
           <SparkleRegular />
-          预览模式：识别结果为本地演示数据，不代表真实大模型结论；未连接 Azure SQL、Blob 或火山方舟。
+          预览模式：识别结果为本地演示数据，不代表真实大模型结论；未连接阿里云 RDS、OSS 或火山方舟。
         </div>
       )}
       {!health && (

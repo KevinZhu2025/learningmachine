@@ -2,8 +2,8 @@ SET NOCOUNT ON;
 SET XACT_ABORT ON;
 SET LOCK_TIMEOUT 15000;
 
-IF DB_NAME() <> N'MEMPALACE'
-    THROW 51000, 'This migration targets MEMPALACE only.', 1;
+IF DB_NAME() <> N'LearningMachineDB'
+    THROW 51000, 'This migration targets LearningMachineDB only.', 1;
 
 IF OBJECT_ID(N'dbo.ImportItem', N'U') IS NULL
    OR OBJECT_ID(N'dbo.ImportBatch', N'U') IS NULL
