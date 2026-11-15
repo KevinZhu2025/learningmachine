@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "learningmachine-api"
 version = "0.1.0"
 description = "LearningMachine knowledge import API"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",

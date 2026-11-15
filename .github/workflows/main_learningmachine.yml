@@ -97,5 +97,13 @@ jobs:
           key: ${{ secrets.ALICLOUD_ECS_SSH_KEY }}
           script: |
             set -euo pipefail
-            sudo DEPLOY_PATH="${{ secrets.ALICLOUD_DEPLOY_PATH }}" \
-              bash -c 'mkdir -p "$DEPLOY_PATH" && tar -xzf /tmp/learningmachine.tar.gz -C "$DEPLOY_PATH" && rm -f /tmp/learningmachine.tar.gz && bash "$DEPLOY_PATH/deploy/deploy.sh"'
+            # scp-action may place the artifact with or without the dist/ prefix
+            PKG=/tmp/learningmachine.tar.gz
+            if [ ! -f "$PKG" ]; then PKG=/tmp/dist/learningmachine.tar.gz; fi
+            echo "Using package: $PKG"
+            sudo DEPLOY_PATH="${{ secrets.ALICLOUD_DEPLOY_PATH }}" bash -c '
+              set -euo pipefail
+              mkdir -p "$DEPLOY_PATH"
+              tar -xzf '"$PKG"' -C "$DEPLOY_PATH"
+              rm -rf /tmp/dist "'"$PKG"'"
+              bash "$DEPLOY_PATH/deploy/deploy.sh"'
