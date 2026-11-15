@@ -87,6 +87,7 @@ jobs:
           key: ${{ secrets.ALICLOUD_ECS_SSH_KEY }}
           source: dist/learningmachine.tar.gz
           target: /tmp
+          strip_components: 1
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
