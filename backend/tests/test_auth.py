@@ -144,7 +144,16 @@ def test_session_expiration_and_production_cookie_flags(auth_client, monkeypatch
         json={"userId": "student-b", "password": "correct-horse-battery"},
     )
     assert login.status_code == 200
-    assert "secure" in login.headers["set-cookie"].lower()
+    # Plain HTTP must NOT carry the Secure flag (browsers drop such cookies),
+    # while HTTPS requests (X-Forwarded-Proto: https) must.
+    assert "secure" not in login.headers["set-cookie"].lower()
+    https_login = client.post(
+        "/api/auth/login",
+        headers={"Origin": AUTH_ORIGIN, "X-Forwarded-Proto": "https"},
+        json={"userId": "student-b", "password": "correct-horse-battery"},
+    )
+    assert https_login.status_code == 200
+    assert "secure" in https_login.headers["set-cookie"].lower()
 
 
 def test_login_rate_limit_is_configurable(auth_client, monkeypatch):

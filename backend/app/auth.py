@@ -33,9 +33,13 @@ class AuthSettings:
     csrf_secret: bytes
     allowed_origins: frozenset[str]
 
-    @property
-    def secure_cookie(self) -> bool:
-        return self.app_env != "development"
+    def secure_cookie_for(self, request: Request) -> bool:
+        """Browsers drop Secure cookies over plain HTTP, so decide per-request
+        (via X-Forwarded-Proto from the reverse proxy, or the URL scheme)."""
+        forwarded = request.headers.get("x-forwarded-proto", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip().lower() == "https"
+        return request.url.scheme == "https"
 
 
 def load_auth_settings() -> AuthSettings:
@@ -330,7 +334,7 @@ def create_auth_router() -> APIRouter:
             value=token,
             max_age=SESSION_TTL_SECONDS,
             httponly=True,
-            secure=settings.secure_cookie,
+            secure=settings.secure_cookie_for(request),
             samesite="lax",
             path="/api",
         )
@@ -342,6 +346,7 @@ def create_auth_router() -> APIRouter:
 
     @router.post("/logout")
     def logout(
+        request: Request,
         response: Response,
         user: AuthenticatedUser = Depends(require_csrf_user),
         session: Session = Depends(get_session),
@@ -354,7 +359,7 @@ def create_auth_router() -> APIRouter:
             key=SESSION_COOKIE,
             path="/api",
             httponly=True,
-            secure=settings.secure_cookie,
+            secure=settings.secure_cookie_for(request),
             samesite="lax",
         )
         return {"loggedOut": True}
