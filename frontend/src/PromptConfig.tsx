@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@fluentui/react-components";
 import { apiFetch } from "./api";
+import { newUuid } from "./uuid";
 
 type Values = {
   subjectId: string;
@@ -103,7 +104,7 @@ export default function PromptConfig({
 
   function addRow() {
     setRows((current) => [...current, {
-      key: crypto.randomUUID(),
+      key: newUuid(),
       id: null,
       original: null,
       values: {

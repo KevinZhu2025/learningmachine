@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { newUuid } from "./uuid";
 import {
   ArrowLeftRegular,
   ArrowClockwiseRegular,
@@ -229,7 +230,7 @@ function App() {
       files.forEach((file) => form.append("files", file));
       urls.split(/\r?\n/).map((url) => url.trim()).filter(Boolean)
         .forEach((url) => form.append("urls", url));
-      idempotencyKey.current ??= crypto.randomUUID();
+      idempotencyKey.current ??= newUuid();
       const response = await apiFetch(`${API}/imports`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey.current },
