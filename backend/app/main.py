@@ -123,7 +123,7 @@ def recover_interrupted_batches() -> list[str]:
         batch_ids = session.scalars(
             select(ImportBatch.import_batch_id).where(
                 ImportBatch.status == "PROCESSING",
-                ImportBatch.is_preview.is_(False),
+                ImportBatch.is_preview == False,  # noqa: E712 — SQL Server 位列需渲染为 = 0，is_(False) 会生成非法 IS 语法
             )
         ).all()
     for batch_id in batch_ids:
