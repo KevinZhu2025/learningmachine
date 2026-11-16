@@ -137,14 +137,17 @@ function App() {
     }
   }
 
-  async function loadRecords() {
+  async function loadRecords(): Promise<ImportRecord[]> {
     try {
       const response = await apiFetch(`${API}/imports`);
       if (!response.ok) throw new Error("导入记录加载失败");
-      setRecords(await response.json());
+      const list = (await response.json()) as ImportRecord[];
+      setRecords(list);
       setError("");
+      return list;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "导入记录加载失败");
+      return [];
     }
   }
 
@@ -187,6 +190,24 @@ function App() {
     window.addEventListener("auth-expired", handleAuthExpired);
     return () => window.removeEventListener("auth-expired", handleAuthExpired);
   }, []);
+
+  // 后台导入轮询：存在处理中的批次时每 5 秒刷新记录与当前详情，无待处理时自动停止。
+  useEffect(() => {
+    if (!authUser) return;
+    const pending = selected?.status === "PROCESSING" || records.some((record) => record.status === "PROCESSING");
+    if (!pending) return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        const latest = await loadRecords();
+        setSelected((current) =>
+          current && current.status === "PROCESSING"
+            ? latest.find((record) => record.importBatchId === current.importBatchId) ?? current
+            : current,
+        );
+      })();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [authUser, records, selected]);
 
   function onAuthenticated(user: AuthUser) {
     setCsrfToken(user.csrfToken);
@@ -417,6 +438,11 @@ function App() {
             <StatusBadge status={selected.status} />
           </div>
           {selected.isPreview && <div className="preview-inline">本地预览生成的候选知识，仅供界面和流程验证。</div>}
+          {selected.status === "PROCESSING" && (
+            <div className="preview-notice">
+              <Spinner size="tiny" /> 正在识别与整理导入内容，完成后自动更新；可离开此页面，稍后在导入记录中查看结果。
+            </div>
+          )}
           {selected.errorMessage && <div className="error-banner" role="alert">{selected.errorMessage}</div>}
           {selected.status === "FAILED" && !selected.isPreview && <Button icon={<ArrowClockwiseRegular />} disabled={busy} onClick={() => void retryImport()}>重试</Button>}
           {selected.sources.length > 0 && (

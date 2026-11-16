@@ -17,9 +17,10 @@ from pypdf.errors import PdfReadError
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from .models import ImportBatch, ImportItem, PromptLeading
+from .models import ImportBatch, ImportItem, ImportSource, PromptLeading
 from .import_services import ImportServiceError, ImportServices
 from .model_contract import ModelResult, validate_request, validate_result
+from .vision import normalized_image, scanned_pdf_images, vision_segments
 
 MAX_FILE_BYTES = 15 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".txt", ".md", ".docx", ".pdf"}
@@ -180,6 +181,31 @@ def extracted_segments(content: str) -> list[dict]:
     if not content.strip():
         raise UnsupportedSourceError("没有提取到可读文本。")
     return [{"SegmentID": str(uuid4()), "Location": None, "PageNumber": None, "BlockID": None, "BoundingBox": None, "Text": content}]
+
+
+def prepare_source_segments(session: Session, source: ImportSource, services: ImportServices) -> None:
+    """后台任务：对提交阶段未解析的图片或扫描 PDF 来源识图，写回 OCR 审计对象与解析结果。"""
+    if not services.vision:
+        raise ImportServiceError("尚未配置支持图像输入的识图模型。")
+    content = services.storage.get(source.source_object_key)
+    extension = Path(source.source_file_name or "").suffix.lower()
+    if extension in IMAGE_EXTENSIONS:
+        images = [normalized_image(content)]
+    elif extension == ".pdf":
+        images = scanned_pdf_images(content)
+    elif extension in OFFICE_EXTENSIONS:
+        # 纯图片版式的 DOC/PPT/PPTX：转换 PDF 后仍无文本层，按扫描件识图。
+        images = scanned_pdf_images(office_pdf(source.source_file_name, content))
+    else:
+        raise ImportServiceError("来源缺少文本解析结果，且不是图片或扫描 PDF，无法后台识图。")
+    raw = services.vision.recognize(images)
+    if len(raw.encode("utf-8")) > 2 * 1024 * 1024:
+        raise ImportServiceError("识图响应超过审计大小限制。")
+    source.ocr_result_object_key = f"{source.import_batch_id}/ocr/{source.source_id}-{uuid4().hex}.json"
+    source.ocr_result_container_name = services.storage.container_name
+    services.storage.put(source.ocr_result_object_key, raw.encode("utf-8"), "application/json")
+    source.extracted_segments = vision_segments(raw, len(images))
+    session.commit()
 
 
 def snapshot_history(session: Session, batch: ImportBatch) -> list[dict]:

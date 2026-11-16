@@ -49,6 +49,7 @@ class ObjectStorage(Protocol):
     container_name: str
 
     def put(self, key: str, content: bytes, content_type: str) -> None: ...
+    def get(self, key: str) -> bytes: ...
     def delete(self, key: str) -> None: ...
 
 
@@ -145,6 +146,17 @@ class OssStorage:
             raise ImportServiceError("OSS 清理失败，需要管理员核对该批次对象。") from exc
         except Exception as exc:
             raise ImportServiceError("OSS 清理失败，需要管理员核对该批次对象。") from exc
+
+    def get(self, key: str) -> bytes:
+        try:
+            return self.bucket.get_object(key).read()
+        except self._oss2.exceptions.OssError as exc:
+            status = getattr(exc, "status", None)
+            if status == 404:
+                raise ImportServiceError("OSS 对象不存在，无法后台识图，请重新导入该批次。") from exc
+            raise ImportServiceError(f"OSS 读取失败（HTTP {status}），请检查存储服务状态。") from exc
+        except Exception as exc:
+            raise ImportServiceError("OSS 读取失败，存储服务未返回 HTTP 状态码；请检查内网连接及读取权限。") from exc
 
 
 class ArkModelProvider:

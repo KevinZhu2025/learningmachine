@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -21,10 +23,10 @@ from .auth import (
     require_csrf_user,
     settings as auth_settings,
 )
-from .db import engine, get_session, initialize_database
+from .db import SessionLocal, engine, get_session, initialize_database
 from .models import ImportBatch, ImportItem, ImportSource
-from .import_services import ImportServiceError, configured_services
-from .vision import normalized_image, scanned_pdf_images, vision_segments
+from .import_services import ImportServiceError, ImportServices, configured_services
+from .vision import normalized_image
 from .processor import (
     IMAGE_EXTENSIONS,
     OFFICE_EXTENSIONS,
@@ -35,6 +37,7 @@ from .processor import (
     extract_plain_text,
     extracted_segments,
     office_pdf,
+    prepare_source_segments,
     run_integrated_import,
 )
 from .schemas import ImportOut, ItemDecisionIn
@@ -47,7 +50,95 @@ from .web_source import (
 UPLOAD_ROOT = Path(os.getenv("UPLOAD_ROOT", "./.data/uploads")).resolve()
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 initialize_database(engine)
-app = FastAPI(title="LearningMachine API", version="0.1.0")
+
+logger = logging.getLogger(__name__)
+
+# 进程内导入队列：有界并发处理大模型批次，批次状态持久化在 ImportBatch.Status，
+# 进程重启后由 recover_interrupted_batches 兜底（详见 docs/async-import-design.md）。
+_import_semaphore = asyncio.Semaphore(int(os.getenv("IMPORT_CONCURRENCY", "2")))
+_processing_batches: set[str] = set()
+_import_tasks: set[asyncio.Task] = set()
+
+
+def enqueue_import_processing(batch_id: str, services: ImportServices | None = None) -> None:
+    """把批次加入后台处理队列；同批次重复入队直接忽略。
+
+    services 由提交方传入以复用已初始化的适配器；启动恢复等无服务实例的场景
+    由 process_import_batch 自行调用 configured_services()。
+    """
+    if batch_id in _processing_batches:
+        return
+    _processing_batches.add(batch_id)
+
+    async def runner() -> None:
+        async with _import_semaphore:
+            try:
+                await asyncio.to_thread(process_import_batch, batch_id, services)
+            except Exception:
+                # process_import_batch 内部已落 FAILED 状态；此处兜底防协程泄漏告警。
+                logger.exception("导入批次后台协程异常终止 batch=%s", batch_id)
+            finally:
+                _processing_batches.discard(batch_id)
+
+    task = asyncio.create_task(runner())
+    _import_tasks.add(task)
+    task.add_done_callback(_import_tasks.discard)
+
+
+def process_import_batch(batch_id: str, services: ImportServices | None = None) -> None:
+    """后台串行处理一个导入批次：补齐识图来源后执行大模型抽取，可在独立线程调用。"""
+    with SessionLocal() as session:
+        try:
+            batch = session.scalar(select(ImportBatch).where(ImportBatch.import_batch_id == batch_id))
+            if batch is None or batch.status != "PROCESSING":
+                return
+            if services is None:
+                services = configured_services()
+            if services is None:
+                raise ImportServiceError("后台导入需要集成服务，当前为预览模式。")
+            for source in batch.sources:
+                if not source.extracted_segments:
+                    prepare_source_segments(session, source, services)
+            run_integrated_import(session, batch, services)
+        except Exception as exc:
+            logger.exception("导入批次后台处理失败 batch=%s", batch_id)
+            try:
+                session.rollback()
+                failed = session.get(ImportBatch, batch_id)
+                if failed is not None:
+                    failed.status = "FAILED"
+                    failed.error_message = (
+                        "暂存数据库写入失败，结果已回滚。"
+                        if isinstance(exc, IntegrityError)
+                        else str(exc) or type(exc).__name__
+                    )
+                    session.commit()
+            except Exception:
+                logger.exception("导入批次失败状态写入失败 batch=%s", batch_id)
+
+
+def recover_interrupted_batches() -> list[str]:
+    """启动时把中断的 PROCESSING 非预览批次重新入队（进程内队列随重启丢失）。"""
+    with SessionLocal() as session:
+        batch_ids = session.scalars(
+            select(ImportBatch.import_batch_id).where(
+                ImportBatch.status == "PROCESSING",
+                ImportBatch.is_preview.is_(False),
+            )
+        ).all()
+    for batch_id in batch_ids:
+        enqueue_import_processing(batch_id)
+    return batch_ids
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if os.getenv("IMPORT_MODE", "preview") == "integrated":
+        recover_interrupted_batches()
+    yield
+
+
+app = FastAPI(title="LearningMachine API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(auth_settings.allowed_origins),
@@ -229,6 +320,7 @@ async def create_import(
         source_parts = [normalized_text] if normalized_text else []
         source_name_parts: list[str] = []
         awaiting_vision = False
+        vision_source_count = 0
         if normalized_text:
             object_name = f"{batch.import_batch_id}-{uuid4().hex}.txt"
             await store_object(object_name, text_bytes, "text/plain; charset=utf-8")
@@ -261,6 +353,22 @@ async def create_import(
             object_name = f"{batch.import_batch_id}-{uuid4().hex}{Path(filename).suffix.lower()}"
             await store_object(object_name, data, content_type)
             source_id = str(uuid4())
+            extension = Path(filename).suffix.lower()
+            pending_vision = extension in IMAGE_EXTENSIONS
+            parsed = None
+            if not pending_vision:
+                parse_data = data
+                parse_filename = filename
+                if extension in OFFICE_EXTENSIONS:
+                    parse_data = await asyncio.to_thread(office_pdf, filename, data)
+                    parse_filename = "converted.pdf"
+                try:
+                    parsed, _ = extract_plain_text(parse_filename, parse_data)
+                except UnsupportedSourceError:
+                    if Path(parse_filename).suffix.lower() != ".pdf":
+                        raise
+                    pending_vision = True  # 扫描 PDF：文本解析失败，转后台识图
+            parsed_segments = extracted_segments(parsed) if services and not pending_vision else None
             session.add(
                 ImportSource(
                     source_id=source_id,
@@ -273,56 +381,24 @@ async def create_import(
                     source_content_type=content_type,
                     source_size_bytes=len(data),
                     source_sha256=hashlib.sha256(data).hexdigest(),
+                    extracted_segments=parsed_segments,
                 )
             )
             if services:
                 session.commit()
                 sources_committed = True
-            extension = Path(filename).suffix.lower()
-            image_extension = extension in IMAGE_EXTENSIONS
-            images = None
-            if image_extension:
-                normalized = await asyncio.to_thread(normalized_image, data)
+            if extension in IMAGE_EXTENSIONS:
+                # 提交阶段仅校验图片可读（保持损坏图片立即报错），识图在后台执行。
+                await asyncio.to_thread(normalized_image, data)
+            if pending_vision:
                 if services is None:
                     awaiting_vision = True
                     continue
-                images = [normalized]
-            else:
-                parse_data = data
-                parse_filename = filename
-                if extension in OFFICE_EXTENSIONS:
-                    parse_data = await asyncio.to_thread(office_pdf, filename, data)
-                    parse_filename = "converted.pdf"
-                try:
-                    parsed, _ = extract_plain_text(parse_filename, parse_data)
-                except UnsupportedSourceError:
-                    if Path(parse_filename).suffix.lower() != ".pdf":
-                        raise
-                    images = await asyncio.to_thread(scanned_pdf_images, parse_data)
-                    if services is None:
-                        awaiting_vision = True
-                        continue
-            if images is not None:
-                if not services.vision:
-                    raise ImportServiceError("尚未配置支持图像输入的识图模型。")
-                raw = await asyncio.to_thread(services.vision.recognize, images)
-                if len(raw.encode("utf-8")) > 2 * 1024 * 1024:
-                    raise ImportServiceError("识图响应超过审计大小限制。")
-                source = session.get(ImportSource, source_id)
-                source.ocr_result_object_key = f"{batch.import_batch_id}/ocr/{source_id}-{uuid4().hex}.json"
-                source.ocr_result_container_name = services.storage.container_name
-                await asyncio.to_thread(services.storage.put, source.ocr_result_object_key, raw.encode("utf-8"), "application/json")
-                session.commit()
-                source.extracted_segments = vision_segments(raw, len(images))
-                parsed = "\n".join(segment["Text"] for segment in source.extracted_segments)
-                session.commit()
+                vision_source_count += 1
+                continue
             source_parts.append(parsed)
             if services is None:
                 session.add(create_preview_item(batch, source_id, parsed, "文件内容 / 首段"))
-            else:
-                if images is None:
-                    session.get(ImportSource, source_id).extracted_segments = extracted_segments(parsed)
-                session.commit()
 
         web_pages = []
         for url in normalized_urls:
@@ -379,14 +455,15 @@ async def create_import(
             batch.error_message = "文件已接收；当前为预览模式，图片或扫描页尚未识别。请启用集成服务后重新导入，不会生成虚构知识点。"
             session.commit()
             return model_out(get_batch(session, batch.import_batch_id, user_id))
-        if not combined:
+        if not combined and not vision_source_count:
             raise UnsupportedSourceError("没有提取到可用于预览的文本。")
         if services is None:
             create_prompt_and_snapshot(session, batch, user_id)
             batch.status = "COMPLETED"
         else:
             session.commit()
-            await asyncio.to_thread(run_integrated_import, session, get_batch(session, batch.import_batch_id, user_id), services)
+            # 提交即返回：识图与大模型抽取转后台队列，进度通过导入记录查询。
+            enqueue_import_processing(batch.import_batch_id, services)
     except (UnsupportedSourceError, PublicWebSourceError, UnicodeDecodeError, OSError, ImportServiceError, IntegrityError) as exc:
         session.rollback()
         if not sources_committed:
@@ -417,23 +494,16 @@ async def retry_import(
     batch = get_batch(session, batch_id, user_id)
     if services is None or batch.status != "FAILED" or batch.is_preview:
         raise HTTPException(409, "仅失败的集成导入任务可以重试。")
-    if not batch.sources or any(not source.extracted_segments for source in batch.sources):
-        raise HTTPException(409, "来源尚未完整解析，不能直接重试模型；请处理原始文件。")
+    if not batch.sources:
+        raise HTTPException(409, "批次没有可重试的导入来源。")
     claimed = session.execute(update(ImportBatch).where(ImportBatch.import_batch_id == batch_id, ImportBatch.status == "FAILED").values(status="PROCESSING", error_message=None).execution_options(synchronize_session=False))
     if claimed.rowcount != 1:
         session.rollback()
         raise HTTPException(409, "此批次已经被其他请求重试。")
     session.commit()
+    # 重试即返回：缺失的识图解析由后台补齐后执行大模型抽取。
+    enqueue_import_processing(batch_id, services)
     session.expire_all()
-    batch = get_batch(session, batch_id, user_id)
-    try:
-        await asyncio.to_thread(run_integrated_import, session, batch, services)
-    except (ImportServiceError, IntegrityError) as exc:
-        session.rollback()
-        batch = session.get(ImportBatch, batch_id)
-        batch.status = "FAILED"
-        batch.error_message = "暂存数据库写入失败，结果已回滚。" if isinstance(exc, IntegrityError) else str(exc)
-        session.commit()
     return model_out(get_batch(session, batch_id, user_id))
 
 

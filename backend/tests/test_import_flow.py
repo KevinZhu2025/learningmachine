@@ -36,6 +36,9 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
         def put(self, key, content, content_type):
             self.objects[key] = content
 
+        def get(self, key):
+            return self.objects[key]
+
         def delete(self, key):
             self.objects.pop(key, None)
 
@@ -90,6 +93,21 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
 
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[main.get_import_services] = lambda: ImportServices(storage, model)
+    # 异步化后提交立即返回 PROCESSING：捕获入队，由测试显式驱动后台处理再断言终态。
+    monkeypatch.setattr(main, "SessionLocal", testing_session)
+    pending_queue: list = []
+
+    def capture_enqueue(batch_id, services=None):
+        pending_queue.append((batch_id, services))
+
+    monkeypatch.setattr(main, "enqueue_import_processing", capture_enqueue)
+
+    def process_pending(batch_id):
+        assert pending_queue and pending_queue[0][0] == batch_id, "提交后应当恰好入队一次"
+        _, captured_services = pending_queue.pop(0)
+        main.process_import_batch(batch_id, captured_services)
+        return client.get(f"/api/imports/{batch_id}").json()
+
     client = TestClient(app)
     try:
         authenticate(client, "integrated-user")
@@ -100,6 +118,8 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
         response = client.post("/api/imports", headers={"Idempotency-Key": "integrated-success"}, data={"subjectId": "历史", "userComments": "提取知识及题目"}, files={"files": ("lesson.txt", original, "text/plain")})
         assert response.status_code == 200, response.text
         batch = response.json()
+        assert batch["status"] == "PROCESSING", batch
+        batch = process_pending(batch["importBatchId"])
         assert batch["status"] == "COMPLETED", batch
         assert batch["isPreview"] is False
         assert len(batch["items"]) == 2
@@ -121,16 +141,20 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
             assert session.query(KnowledgeBase).count() == 0
         repeated = client.post("/api/imports", headers={"Idempotency-Key": "integrated-success"}, data={"subjectId": "历史", "userComments": "提取知识及题目"}, files={"files": ("lesson.txt", original, "text/plain")})
         assert repeated.json()["importBatchId"] == batch["importBatchId"]
+        assert not pending_queue, "幂等重复提交不应再次入队"
         assert len(model.requests) == 2
         model.only_questions = True
         model.bad_evidence = True
         failed = client.post("/api/imports", headers={"Idempotency-Key": "integrated-failure"}, files={"files": ("questions.txt", original, "text/plain")}).json()
+        assert failed["status"] == "PROCESSING"
+        failed = process_pending(failed["importBatchId"])
         assert failed["status"] == "FAILED" and failed["items"] == [] and len(failed["sources"]) == 1
         first_attempt = model.requests[-1]
         model.bad_evidence = False
         retried = client.post(f"/api/imports/{failed['importBatchId']}/retry")
         assert retried.status_code == 200, retried.text
-        result = retried.json()
+        assert retried.json()["status"] == "PROCESSING"
+        result = process_pending(failed["importBatchId"])
         assert result["status"] == "COMPLETED" and len(result["items"]) == 1
         assert result["items"][0]["knowledgeId"] is None and result["items"][0]["knowledgeTitle"] is None
         assert result["items"][0]["questionItemsJson"]
@@ -140,14 +164,20 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
         for invalid in ("request", "source", "reference", "image", "json"):
             model.invalid = invalid
             malformed = client.post("/api/imports", headers={"Idempotency-Key": f"invalid-{invalid}"}, files={"files": ("invalid.txt", original, "text/plain")}).json()
+            assert malformed["status"] == "PROCESSING"
+            malformed = process_pending(malformed["importBatchId"])
             assert malformed["status"] == "FAILED" and malformed["items"] == []
             assert len(malformed["sources"]) == 1
         model.invalid = None
         unreadable = client.post("/api/imports", headers={"Idempotency-Key": "ocr-not-selected"}, files={"files": ("scan.png", b"image source", "image/png")}).json()
+        # 损坏图片在提交阶段即被校验拒绝（不入队、不识图），保持立即失败语义。
         assert unreadable["status"] == "FAILED" and len(unreadable["sources"]) == 1 and unreadable["items"] == []
+        assert not pending_queue
         assert b"image source" in storage.objects.values()
         model.fail_generation = True
         generation_failed = client.post("/api/imports", headers={"Idempotency-Key": "generation-failure"}, data={"subjectId": "历史", "userComments": "失败后固定基础快照"}, files={"files": ("generation.txt", original, "text/plain")}).json()
+        assert generation_failed["status"] == "PROCESSING"
+        generation_failed = process_pending(generation_failed["importBatchId"])
         assert generation_failed["status"] == "FAILED" and generation_failed["items"] == []
         original_generation = model.requests[-1]
         with testing_session() as session:
@@ -160,6 +190,8 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
             session.commit()
         model.fail_generation = False
         generated_retry = client.post(f"/api/imports/{generation_failed['importBatchId']}/retry").json()
+        assert generated_retry["status"] == "PROCESSING"
+        generated_retry = process_pending(generation_failed["importBatchId"])
         assert generated_retry["status"] == "COMPLETED"
         assert model.requests[-2]["Task"] == "generate_course_prompt"
         assert model.requests[-2]["PromptSnapshotHash"] == original_generation["PromptSnapshotHash"]
@@ -171,6 +203,8 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
         Image.new("RGB", (100, 60), "white").save(image_buffer, format="PNG")
         image = image_buffer.getvalue()
         picture = client.post("/api/imports", headers={"Idempotency-Key": "vision-picture"}, files={"files": ("picture.png", image, "image/png")}).json()
+        assert picture["status"] == "PROCESSING", picture
+        picture = process_pending(picture["importBatchId"])
         assert picture["status"] == "COMPLETED", picture
         assert picture["items"][0]["knowledgeTitle"] is None
         assert model.requests[-1]["Sources"][0]["Segments"][0]["PageNumber"] == 1
@@ -178,6 +212,8 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
             document.new_page().insert_image(pymupdf.Rect(10, 10, 110, 70), stream=image)
             scanned = document.tobytes()
         scanned_result = client.post("/api/imports", headers={"Idempotency-Key": "vision-pdf"}, files={"files": ("scan.pdf", scanned, "application/pdf")}).json()
+        assert scanned_result["status"] == "PROCESSING", scanned_result
+        scanned_result = process_pending(scanned_result["importBatchId"])
         assert scanned_result["status"] == "COMPLETED", scanned_result
         with testing_session() as session:
             saved_source = session.query(ImportSource).filter_by(import_batch_id=scanned_result["importBatchId"]).one()
@@ -189,6 +225,8 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
             document.new_page().insert_image(pymupdf.Rect(10, 10, 110, 70), stream=image)
             mixed = document.tobytes()
         mixed_result = client.post("/api/imports", headers={"Idempotency-Key": "vision-mixed-pdf"}, files={"files": ("mixed.pdf", mixed, "application/pdf")}).json()
+        assert mixed_result["status"] == "PROCESSING", mixed_result
+        mixed_result = process_pending(mixed_result["importBatchId"])
         assert mixed_result["status"] == "COMPLETED", mixed_result
         assert len(model.requests[-1]["Sources"][0]["Segments"]) == 2
         with testing_session() as session:
@@ -197,6 +235,129 @@ def test_integrated_blob_model_pipeline_and_retry(tmp_path, monkeypatch):
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
+
+
+def test_submit_returns_immediately_and_recovery_requeues_interrupted_batches(tmp_path, monkeypatch):
+    import json
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app import main
+    from app.db import get_session
+    from app.import_services import ImportServices
+
+    class Storage:
+        container_name = "private-test"
+
+        def __init__(self):
+            self.objects = {}
+
+        def put(self, key, content, content_type):
+            self.objects[key] = content
+
+        def get(self, key):
+            return self.objects[key]
+
+        def delete(self, key):
+            self.objects.pop(key, None)
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, request, instruction):
+            self.calls += 1
+            source = request["Sources"][0]
+            segment = source["Segments"][0]
+            result = {"SchemaVersion": "2.0", "RequestID": request["RequestID"], "ImportBatchID": request["ImportBatchID"], "SourceResults": [{"SourceID": source["SourceID"], "ExtractionVersion": source["ExtractionVersion"], "Status": "OK", "Error": None}], "KnowledgeItems": [], "QuestionItems": [], "Warnings": [], "Errors": []}
+            return json.dumps(result, ensure_ascii=False)
+
+        def recognize(self, images):
+            return json.dumps({"Pages": [{"PageNumber": number, "Blocks": [{"Text": "识图原文。", "Confidence": 0.95}]} for number in range(1, len(images) + 1)]}, ensure_ascii=False)
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'recovery.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    testing_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    storage, model = Storage(), Model()
+
+    def override_session():
+        with testing_session() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[main.get_import_services] = lambda: ImportServices(storage, model, model)
+    monkeypatch.setattr(main, "SessionLocal", testing_session)
+    captured: list = []
+
+    def capture_enqueue(batch_id, services=None):
+        captured.append((batch_id, services))
+
+    monkeypatch.setattr(main, "enqueue_import_processing", capture_enqueue)
+    client = TestClient(app)
+    try:
+        authenticate(client, "recovery-user")
+        with testing_session() as session:
+            session.add(PromptLeading(subject_id="General", user_id="Admin", prompts="按原文提取，不编造。"))
+            session.commit()
+        from PIL import Image
+        import io
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (80, 50), "white").save(image_buffer, format="PNG")
+        # 提交图片导入：请求内仅校验图片可读，立即返回 PROCESSING。
+        submitted = client.post("/api/imports", headers={"Idempotency-Key": "recovery-picture"}, files={"files": ("note.png", image_buffer.getvalue(), "image/png")}).json()
+        assert submitted["status"] == "PROCESSING", submitted
+        assert submitted["items"] == []
+        assert len(captured) == 1
+        # 处理中重复提交同幂等键：返回同批次、不再入队、模型未被调用。
+        repeated = client.post("/api/imports", headers={"Idempotency-Key": "recovery-picture"}, files={"files": ("note.png", image_buffer.getvalue(), "image/png")}).json()
+        assert repeated["importBatchId"] == submitted["importBatchId"]
+        assert repeated["status"] == "PROCESSING"
+        assert len(captured) == 1 and model.calls == 0
+        # 启动恢复：模拟进程重启后扫描孤儿 PROCESSING 批次重新入队。
+        captured.clear()
+        recovered = main.recover_interrupted_batches()
+        assert recovered == [submitted["importBatchId"]]
+        assert captured == [(submitted["importBatchId"], None)]
+        # 真正驱动后台处理：识图来源被补齐，批次完成。
+        main.process_import_batch(submitted["importBatchId"], ImportServices(storage, model, model))
+        final = client.get(f"/api/imports/{submitted['importBatchId']}").json()
+        assert final["status"] == "COMPLETED", final
+        assert model.calls == 1
+        with testing_session() as session:
+            from app.models import ImportBatch as BatchModel
+            saved = session.get(BatchModel, submitted["importBatchId"])
+            assert saved.sources[0].extracted_segments[0]["Location"] == "第1页/区块1"
+            assert saved.sources[0].ocr_result_object_key in storage.objects
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_enqueue_import_processing_deduplicates_and_runs_once(monkeypatch):
+    import asyncio
+    import threading
+    from app import main
+
+    calls: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_process(batch_id, services=None):
+        calls.append(batch_id)
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(main, "process_import_batch", slow_process)
+
+    async def scenario():
+        main.enqueue_import_processing("batch-dup")
+        main.enqueue_import_processing("batch-dup")
+        await asyncio.to_thread(started.wait, 5)
+        main.enqueue_import_processing("batch-dup")  # 处理中的批次不会重复入队
+        release.set()
+        await asyncio.gather(*list(main._import_tasks))
+
+    asyncio.run(scenario())
+    assert calls == ["batch-dup"]
 
 
 def test_official_ark_and_oss_adapters_use_safe_contract(monkeypatch):
