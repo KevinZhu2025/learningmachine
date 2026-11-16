@@ -82,6 +82,8 @@ class ArkVisionProvider(ArkModelProvider):
                 ],
                 response_format={"type": "json_object"},
                 max_tokens=8192,
+                # 方舟模型默认开启思考；纯转写用不到，且密集页会拖过 90 秒客户端超时（实测 90s 超时 → 关闭后 20s）。
+                extra_body={"thinking": {"type": "disabled"}},
             )
             choice = response.choices[0]
             if choice.finish_reason != "stop" or not choice.message.content:
@@ -90,7 +92,8 @@ class ArkVisionProvider(ArkModelProvider):
         except ImportServiceError:
             raise
         except Exception as exc:
-            raise ImportServiceError("识图调用失败：请确认当前模型支持图像输入、JSON输出及该端点权限。") from exc
+            detail = str(exc).strip() or type(exc).__name__
+            raise ImportServiceError(f"识图调用失败（{type(exc).__name__}: {detail[:160]}）。请确认当前模型支持图像输入、JSON输出及该端点权限。") from exc
 
 
 def vision_segments(raw: str, page_count: int) -> list[dict]:
